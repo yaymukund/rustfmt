@@ -410,23 +410,17 @@ impl<'a> Rewrite for [ast::Attribute] {
                 let doc_comment_str = doc_comment_str.expect("doc comments, but no result");
                 result.push_str(&doc_comment_str);
 
-                let missing_span = attrs
-                    .get(doc_comment_len)
-                    .map(|next| mk_sp(attrs[doc_comment_len - 1].span.hi(), next.span.lo()));
-                if let Some(missing_span) = missing_span {
+                if let Some((comment, missing_span)) =
+                    recover_missing_comment_in_attr(attrs, doc_comment_len - 1, context, &shape)
+                {
                     let snippet = context.snippet(missing_span);
                     let (mla, mlb) = has_newlines_before_after_comment(snippet);
-                    let comment = recover_missing_comment_in_span(
-                        missing_span,
-                        shape.with_max_width(context.config),
-                        context,
-                        0,
-                    )?;
                     let comment = if comment.is_empty() {
                         format!("\n{}", mlb)
                     } else {
                         format!("{}{}\n{}", mla, comment, mlb)
                     };
+
                     result.push_str(&comment);
                     result.push_str(&shape.indent.to_string(context.config));
                 }
@@ -442,16 +436,9 @@ impl<'a> Rewrite for [ast::Attribute] {
                 let derive_str = format_derive(derives, shape, context)?;
                 result.push_str(&derive_str);
 
-                let missing_span = attrs
-                    .get(derives.len())
-                    .map(|next| mk_sp(attrs[derives.len() - 1].span.hi(), next.span.lo()));
-                if let Some(missing_span) = missing_span {
-                    let comment = recover_missing_comment_in_span(
-                        missing_span,
-                        shape.with_max_width(context.config),
-                        context,
-                        0,
-                    )?;
+                if let Some((comment, missing_span)) =
+                    recover_missing_comment_in_attr(attrs, derives.len() - 1, context, &shape)
+                {
                     result.push_str(&comment);
                     if let Some(next) = attrs.get(derives.len()) {
                         if next.is_doc_comment() {
@@ -475,16 +462,9 @@ impl<'a> Rewrite for [ast::Attribute] {
             let formatted_attr = attrs[0].rewrite(context, shape)?;
             result.push_str(&formatted_attr);
 
-            let missing_span = attrs
-                .get(1)
-                .map(|next| mk_sp(attrs[0].span.hi(), next.span.lo()));
-            if let Some(missing_span) = missing_span {
-                let comment = recover_missing_comment_in_span(
-                    missing_span,
-                    shape.with_max_width(context.config),
-                    context,
-                    0,
-                )?;
+            if let Some((comment, missing_span)) =
+                recover_missing_comment_in_attr(attrs, 0, context, &shape)
+            {
                 result.push_str(&comment);
                 if let Some(next) = attrs.get(1) {
                     if next.is_doc_comment() {
@@ -500,6 +480,20 @@ impl<'a> Rewrite for [ast::Attribute] {
             attrs = &attrs[1..];
         }
     }
+}
+
+fn recover_missing_comment_in_attr(
+    attrs: &[ast::Attribute],
+    i: usize,
+    context: &RewriteContext<'_>,
+    shape: &Shape,
+) -> Option<(String, Span)> {
+    let lo = attrs.get(i + 1)?.span.lo();
+    let hi = attrs[i].span.hi();
+    let span = mk_sp(hi, lo);
+    let comment =
+        recover_missing_comment_in_span(span, shape.with_max_width(context.config), context, 0)?;
+    Some((comment, span))
 }
 
 fn attr_prefix(attr: &ast::Attribute) -> &'static str {
