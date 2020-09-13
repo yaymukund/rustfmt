@@ -242,23 +242,33 @@ fn rewrite_initial_doc_comments(
     }
     // Rewrite doc comments
     let sugared_docs = take_while_with_pred(context, attrs, |a| a.is_doc_comment());
-    if !sugared_docs.is_empty() {
-        let snippet = sugared_docs
-            .iter()
-            .map(|a| context.snippet(a.span))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Some((
-            sugared_docs.len(),
-            Some(rewrite_doc_comment(
-                &snippet,
-                shape.comment(context.config),
-                context.config,
-            )?),
-        ));
+    join_doc_comments(context, sugared_docs.iter(), shape)
+}
+
+fn join_doc_comments<'a, T>(
+    context: &RewriteContext<'_>,
+    doc_comments: T,
+    shape: Shape,
+) -> Option<(usize, Option<String>)>
+where
+    T: Iterator<Item = &'a ast::Attribute>,
+{
+    let snippets = doc_comments
+        .map(|a| context.snippet(a.span))
+        .collect::<Vec<_>>();
+
+    if snippets.is_empty() {
+        return Some((0, None));
     }
 
-    Some((0, None))
+    return Some((
+        snippets.len(),
+        Some(rewrite_doc_comment(
+            &snippets.join("\n"),
+            shape.comment(context.config),
+            context.config,
+        )?),
+    ));
 }
 
 impl Rewrite for ast::NestedMetaItem {
@@ -394,6 +404,16 @@ impl<'a> Rewrite for [ast::Attribute] {
         // The current remaining attributes.
         let mut attrs = self;
         let mut result = String::new();
+        let indent = shape.indent.to_string(context.config);
+
+        // first, collect and prepend all doc comments
+        let doc_comments = attrs.iter().filter(|attr| attr.is_doc_comment());
+        let (doc_comment_len, doc_comment_str) = join_doc_comments(context, doc_comments, shape)?;
+
+        if doc_comment_len > 0 {
+            let doc_comment_str = doc_comment_str.expect("doc comments, but no result");
+            result.push_str(&doc_comment_str);
+        }
 
         // This is not just a simple map because we need to handle doc comments
         // (where we take as many doc comment attributes as possible) and possibly
@@ -408,7 +428,7 @@ impl<'a> Rewrite for [ast::Attribute] {
                 rewrite_initial_doc_comments(context, attrs, shape)?;
             if doc_comment_len > 0 {
                 let doc_comment_str = doc_comment_str.expect("doc comments, but no result");
-                result.push_str(&doc_comment_str);
+                // result.push_str(&doc_comment_str);
 
                 if let Some((comment, missing_span)) =
                     recover_missing_comment_in_attr(attrs, doc_comment_len - 1, context, &shape)
@@ -422,7 +442,7 @@ impl<'a> Rewrite for [ast::Attribute] {
                     };
 
                     result.push_str(&comment);
-                    result.push_str(&shape.indent.to_string(context.config));
+                    result.push_str(&indent);
                 }
 
                 attrs = &attrs[doc_comment_len..];
@@ -448,7 +468,7 @@ impl<'a> Rewrite for [ast::Attribute] {
                         }
                     }
                     result.push('\n');
-                    result.push_str(&shape.indent.to_string(context.config));
+                    result.push_str(&indent);
                 }
 
                 attrs = &attrs[derives.len()..];
@@ -474,7 +494,7 @@ impl<'a> Rewrite for [ast::Attribute] {
                     }
                 }
                 result.push('\n');
-                result.push_str(&shape.indent.to_string(context.config));
+                result.push_str(&indent);
             }
 
             attrs = &attrs[1..];

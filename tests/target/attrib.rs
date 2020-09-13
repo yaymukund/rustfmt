@@ -1,5 +1,7 @@
 // rustfmt-wrap_comments: true
 // Test attributes and doc comments are preserved.
+//! Doc comment
+//! Crate doc comment
 #![doc(
     html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
     html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
@@ -7,13 +9,7 @@
     html_playground_url = "https://play.rust-lang.org/",
     test(attr(deny(warnings)))
 )]
-
-//! Doc comment
-
 #![attribute]
-
-//! Crate doc comment
-
 // Comment
 
 // Comment on attribute
@@ -25,7 +21,6 @@
 /// Blah blah blah.
 /// Blah blah blah.
 /// Blah blah blah.
-
 /// Blah blah blah.
 impl Bar {
     /// Blah blah blooo.
@@ -51,13 +46,13 @@ impl Bar {
     fn f3(self) -> Dog {}
 
     /// Blah blah bing.
+    /// Blah blah bing.
+    /// Blah blah bing.
 
     #[attrib1]
-    /// Blah blah bing.
     #[attrib2]
     // Another comment that needs rewrite because it's tooooooooooooooooooooooooooooooo
     // loooooooooooong.
-    /// Blah blah bing.
     fn f4(self) -> Cat {}
 
     // We want spaces around `=`
@@ -159,12 +154,10 @@ fn attributes_on_statements() {
 }
 
 // Large derives
+/// Foo bar baz
 #[derive(
     Add, Sub, Mul, Div, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug, Hash, Serialize, Mul,
 )]
-
-/// Foo bar baz
-
 #[derive(
     Add,
     Sub,
