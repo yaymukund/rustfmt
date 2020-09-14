@@ -98,7 +98,7 @@ fn argument_shape(
 }
 
 fn format_derive(
-    derives: &[ast::Attribute],
+    derives: &[&ast::Attribute],
     shape: Shape,
     context: &RewriteContext<'_>,
 ) -> Option<String> {
@@ -231,44 +231,36 @@ where
     &attrs[..len]
 }
 
-/// Rewrite the any doc comments which come before any other attributes.
-fn rewrite_initial_doc_comments(
-    context: &RewriteContext<'_>,
-    attrs: &[ast::Attribute],
-    shape: Shape,
-) -> Option<(usize, Option<String>)> {
-    if attrs.is_empty() {
-        return Some((0, None));
-    }
-    // Rewrite doc comments
-    let sugared_docs = take_while_with_pred(context, attrs, |a| a.is_doc_comment());
-    join_doc_comments(context, sugared_docs.iter(), shape)
+fn span_between(first: &ast::Attribute, second: &ast::Attribute) -> Span {
+    mk_sp(first.span.hi(), second.span.lo())
 }
 
-fn join_doc_comments<'a, T>(
+fn is_separated(
+    first: &ast::Attribute,
+    second: &ast::Attribute,
     context: &RewriteContext<'_>,
-    doc_comments: T,
+) -> bool {
+    let span = span_between(first, second);
+    let snippet = context.snippet(span);
+    count_newlines(snippet) >= 2 || snippet.contains('/')
+}
+
+fn join_doc_comments(
+    doc_comments: &[&ast::Attribute],
+    context: &RewriteContext<'_>,
     shape: Shape,
-) -> Option<(usize, Option<String>)>
-where
-    T: Iterator<Item = &'a ast::Attribute>,
-{
-    let snippets = doc_comments
-        .map(|a| context.snippet(a.span))
-        .collect::<Vec<_>>();
+) -> Option<String> {
+    if doc_comments.is_empty() {
+        return None;
+    } else {
+        let doc_comments = doc_comments
+            .iter()
+            .map(|a| context.snippet(a.span))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    if snippets.is_empty() {
-        return Some((0, None));
+        rewrite_doc_comment(&doc_comments, shape.comment(context.config), context.config)
     }
-
-    return Some((
-        snippets.len(),
-        Some(rewrite_doc_comment(
-            &snippets.join("\n"),
-            shape.comment(context.config),
-            context.config,
-        )?),
-    ));
 }
 
 impl Rewrite for ast::NestedMetaItem {
@@ -401,104 +393,134 @@ impl<'a> Rewrite for [ast::Attribute] {
             return Some(String::new());
         }
 
-        // The current remaining attributes.
-        let mut attrs = self;
-        let mut result = String::new();
-        let indent = shape.indent.to_string(context.config);
-
-        // first, collect and prepend all doc comments
-        let doc_comments = attrs.iter().filter(|attr| attr.is_doc_comment());
-        let (doc_comment_len, doc_comment_str) = join_doc_comments(context, doc_comments, shape)?;
-
-        if doc_comment_len > 0 {
-            let doc_comment_str = doc_comment_str.expect("doc comments, but no result");
-            result.push_str(&doc_comment_str);
-        }
-
         // This is not just a simple map because we need to handle doc comments
         // (where we take as many doc comment attributes as possible) and possibly
         // merging derives into a single attribute.
-        loop {
-            if attrs.is_empty() {
-                return Some(result);
+        let indent = shape.indent.to_string(context.config);
+        let mut result = String::new();
+        let mut attrs = self.iter().peekable();
+        let mut acc_derives = Vec::new();
+        let mut acc_doc_comments = Vec::new();
+
+        while let Some(attr) = attrs.next() {
+            let mut attr_result = String::new();
+            let next = attrs.peek().copied();
+            let mut wrote_doc_comment = false;
+
+            if attr.is_doc_comment() {
+                acc_doc_comments.push(attr);
+
+                if !can_merge(attr, next, |n| n.is_doc_comment(), context) {
+                    wrote_doc_comment = true;
+                    let doc_comments = join_doc_comments(&acc_doc_comments, context, shape)?;
+                    acc_doc_comments.clear();
+                    attr_result.push_str(&doc_comments);
+                }
+            } else if context.config.merge_derives() && is_derive(attr) {
+                acc_derives.push(attr);
+
+                if !can_merge(attr, next, |n| is_derive(n), context) {
+                    let derives = format_derive(&acc_derives, shape, context)?;
+                    acc_derives.clear();
+                    attr_result.push_str(&derives);
+                }
+            } else {
+                let formatted_attr = attr.rewrite(context, shape)?;
+                attr_result.push_str(&formatted_attr);
             }
 
-            // Handle doc comments.
-            let (doc_comment_len, doc_comment_str) =
-                rewrite_initial_doc_comments(context, attrs, shape)?;
-            if doc_comment_len > 0 {
-                let doc_comment_str = doc_comment_str.expect("doc comments, but no result");
-                // result.push_str(&doc_comment_str);
+            if let Some(n) = next {
+                let span = span_between(attr, n);
+                if let Some(comment) = recover_missing_comment_in_span(
+                    span,
+                    shape.with_max_width(context.config),
+                    context,
+                    0,
+                ) {
+                    let snippet = context.snippet(span);
+                    let (before, after) = has_newlines_before_after_comment(snippet);
 
-                if let Some((comment, missing_span)) =
-                    recover_missing_comment_in_attr(attrs, doc_comment_len - 1, context, &shape)
-                {
-                    let snippet = context.snippet(missing_span);
-                    let (mla, mlb) = has_newlines_before_after_comment(snippet);
-                    let comment = if comment.is_empty() {
-                        format!("\n{}", mlb)
-                    } else {
-                        format!("{}{}\n{}", mla, comment, mlb)
-                    };
-
-                    result.push_str(&comment);
-                    result.push_str(&indent);
+                    if wrote_doc_comment && !comment.is_empty() {
+                        attr_result.push_str(before);
+                    }
+                    attr_result.push_str(&comment);
+                    attr_result.push_str(after);
                 }
+            }
 
-                attrs = &attrs[doc_comment_len..];
-
+            if attr_result.is_empty() {
                 continue;
             }
 
-            // Handle derives if we will merge them.
-            if context.config.merge_derives() && is_derive(&attrs[0]) {
-                let derives = take_while_with_pred(context, attrs, is_derive);
-                let derive_str = format_derive(derives, shape, context)?;
-                result.push_str(&derive_str);
+            result.push_str(&attr_result);
 
-                if let Some((comment, missing_span)) =
-                    recover_missing_comment_in_attr(attrs, derives.len() - 1, context, &shape)
-                {
-                    result.push_str(&comment);
-                    if let Some(next) = attrs.get(derives.len()) {
-                        if next.is_doc_comment() {
-                            let snippet = context.snippet(missing_span);
-                            let (_, mlb) = has_newlines_before_after_comment(snippet);
-                            result.push_str(&mlb);
-                        }
-                    }
-                    result.push('\n');
-                    result.push_str(&indent);
-                }
-
-                attrs = &attrs[derives.len()..];
-
-                continue;
-            }
-
-            // If we get here, then we have a regular attribute, just handle one
-            // at a time.
-
-            let formatted_attr = attrs[0].rewrite(context, shape)?;
-            result.push_str(&formatted_attr);
-
-            if let Some((comment, missing_span)) =
-                recover_missing_comment_in_attr(attrs, 0, context, &shape)
-            {
-                result.push_str(&comment);
-                if let Some(next) = attrs.get(1) {
-                    if next.is_doc_comment() {
-                        let snippet = context.snippet(missing_span);
-                        let (_, mlb) = has_newlines_before_after_comment(snippet);
-                        result.push_str(&mlb);
-                    }
-                }
+            if next.is_some() {
                 result.push('\n');
                 result.push_str(&indent);
             }
-
-            attrs = &attrs[1..];
         }
+
+        Some(result)
+
+        //        if let Some((comment, missing_span)) =
+        //            recover_missing_comment_in_attr(attrs, derives.len() - 1, context, &shape)
+        //        {
+        //            result.push_str(&comment);
+        //            if let Some(next) = attrs.get(derives.len()) {
+        //                if next.is_doc_comment() {
+        //                    let snippet = context.snippet(missing_span);
+        //                    let (_, mlb) = has_newlines_before_after_comment(snippet);
+        //                    result.push_str(&mlb);
+        //                }
+        //            }
+        //            result.push('\n');
+        //            result.push_str(&indent);
+        //        }
+
+        //        attrs = &attrs[derives.len()..];
+
+        //        continue;
+        //    }
+
+        //    // If we get here, then we have a regular attribute, just handle one
+        //    // at a time.
+
+        //    let formatted_attr = attrs[0].rewrite(context, shape)?;
+        //    result.push_str(&formatted_attr);
+
+        //    if let Some((comment, missing_span)) =
+        //        recover_missing_comment_in_attr(attrs, 0, context, &shape)
+        //    {
+        //        result.push_str(&comment);
+        //        if let Some(next) = attrs.get(1) {
+        //            if next.is_doc_comment() {
+        //                let snippet = context.snippet(missing_span);
+        //                let (_, mlb) = has_newlines_before_after_comment(snippet);
+        //                result.push_str(&mlb);
+        //            }
+        //        }
+        //        result.push('\n');
+        //        result.push_str(&indent);
+        //    }
+
+        //    attrs = &attrs[1..];
+        //}
+    }
+}
+
+fn can_merge<F>(
+    attr: &ast::Attribute,
+    next: Option<&ast::Attribute>,
+    f: F,
+    context: &RewriteContext<'_>,
+) -> bool
+where
+    F: Fn(&ast::Attribute) -> bool,
+{
+    match next {
+        None => false,
+        Some(n) if f(n) => !is_separated(attr, n, context),
+        _ => false,
     }
 }
 
